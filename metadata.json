@@ -1,0 +1,7 @@
+{
+  "name": "Gemini Heavy",
+  "description": "An agentic orchestrator where four AI agents collaborate and refine their answers, which are then synthesized into a single, final response.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
