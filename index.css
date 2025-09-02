@@ -243,6 +243,8 @@ header h1 {
 .progress-bars-container .progress-bar:nth-child(3)::after { animation-delay: 0.3s; }
 .progress-bars-container .progress-bar:nth-child(4)::after { animation-delay: 0.45s; }
 .progress-bars-container .progress-bar:nth-child(5)::after { animation-delay: 0.6s; }
+.progress-bars-container .progress-bar:nth-child(6)::after { animation-delay: 0.75s; }
+
 
 .progress-bar.completed {
   background-color: #34a853 !important; /* Override stage colors */
@@ -260,6 +262,10 @@ header h1 {
 .progress-bars-container.refining .progress-bar::after { background-color: #f9ab00; }
 .progress-bars-container.synthesis .progress-bar { background-color: #fdd8b8; }
 .progress-bars-container.synthesis .progress-bar::after { background-color: #ef6c00; }
+.progress-bars-container.final-synthesis .progress-bar { background-color: #d1c4e9; }
+.progress-bars-container.final-synthesis .progress-bar::after { background-color: #673ab7; }
+.progress-bars-container.reviewing .progress-bar { background-color: #e0f7fa; }
+.progress-bars-container.reviewing .progress-bar::after { background-color: #0097a7; }
 .progress-bars-container.verification .progress-bar { background-color: #f8d7da; }
 .progress-bars-container.verification .progress-bar::after { background-color: #d93025; }
 
@@ -315,34 +321,29 @@ body.dark-mode .run-button:hover:not(:disabled) { background-color: #5f6368; }
 body.dark-mode .input-row button[type="submit"]:disabled { background-color: #5f6368; }
 .input-row button svg { width: 24px; height: 24px; }
 
-.mic-button, .control-button.attach { background-color: var(--control-button-bg) !important; color: var(--control-button-color) !important; width: 48px !important; height: 48px !important; }
-.mic-button:hover:not(:disabled), .control-button.attach:hover:not(:disabled) { background-color: var(--control-button-hover-bg) !important; }
+.mic-button, .control-button.attach, .deep-think-button { background-color: var(--control-button-bg) !important; color: var(--control-button-color) !important; width: 48px !important; height: 48px !important; }
+.mic-button:hover:not(:disabled), .control-button.attach:hover:not(:disabled), .deep-think-button:hover:not(:disabled):not(.selected) { background-color: var(--control-button-hover-bg) !important; }
 .mic-button.listening { background-color: #f5c1c1 !important; color: #d93025 !important; animation: pulse 1.5s infinite; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(217, 48, 37, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(217, 48, 37, 0); } 100% { box-shadow: 0 0 0 0 rgba(217, 48, 37, 0); } }
 
-.deep-think-button {
+.deep-think-button.selected {
     background-color: #673ab7 !important;
     color: #ffffff !important;
 }
-.deep-think-button:hover:not(:disabled) {
+.deep-think-button.selected:hover:not(:disabled) {
     background-color: #512da8 !important;
 }
 .deep-think-button:disabled {
-    background-color: #d1c4e9 !important;
+    opacity: 0.6;
     cursor: not-allowed;
 }
-body.dark-mode .deep-think-button {
+body.dark-mode .deep-think-button.selected {
     background-color: #9575cd !important;
     color: #202124 !important;
 }
-body.dark-mode .deep-think-button:hover:not(:disabled) {
+body.dark-mode .deep-think-button.selected:hover:not(:disabled) {
     background-color: #7e57c2 !important;
 }
-body.dark-mode .deep-think-button:disabled {
-    background-color: #512da8 !important;
-    opacity: 0.5;
-}
-
 
 /* Attachment Preview */
 .attachment-preview { display: flex; align-items: center; width: 100%; background-color: var(--control-button-bg); padding: 0.5rem; border-radius: 0.75rem; gap: 0.5rem; animation: fadeIn 0.3s ease; }

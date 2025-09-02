@@ -5,11 +5,12 @@ import { GoogleGenAI, Content } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-const MODEL_NAME = 'gemini-2.5-pro';
+const MODEL_NAME = 'gemini-2.5-flash';
 const INITIAL_SYSTEM_INSTRUCTION = "You are a foundational AI agent. Your goal is to provide a strong, initial response to the user's query, whatever the topic. Break down the request, identify the core requirements, and generate a clear, well-structured starting point. This could be an outline, a basic explanation, or a foundational concept.\n\n**If the user's request involves coding:** Provide a foundational code structure or algorithm. Your code should be clean, well-commented, and directly address the core problem. Explain your approach briefly. Your response is the first step for a team of AI agents, so clarity and correctness are paramount.";
 const ELABORATION_SYSTEM_INSTRUCTION = "You are an elaboration and expansion AI. You will receive a foundational response to a user's query. Your task is to build upon this response, adding more detail, providing concrete examples, exploring related concepts, and generally making the answer more comprehensive and useful. Your goal is to expand, not to critique or change the core idea of the initial response.";
 const REFINEMENT_SYSTEM_INSTRUCTION = "You are a critical analysis and refinement AI. You will receive an initial response. Your task is to critically evaluate it. Identify logical fallacies, find missing details, consider alternative perspectives, and improve the overall quality and accuracy of the response. Explain the specific changes you made and why they are improvements.\n\n**If the content is code:** Your task is to identify bugs, logical errors, edge cases, or areas for optimization. Refactor and improve the provided code, explaining the specific changes you made and why they are necessary. Your goal is to produce a more robust and efficient version of the code.";
-const SYNTHESIZER_SYSTEM_INSTRUCTION = "You are a master synthesizer AI. You will receive four refined responses. Your task is to analyze, compare, and merge the best elements from each to create a single, comprehensive, and polished final answer. Ensure the final response is cohesive, well-organized, and directly addresses all aspects of the user's original query.\n\n**If the responses are code:** Synthesize the best elements from each solution to create a single, production-quality final version. Ensure the final code is complete and runnable, including all necessary boilerplate (imports, main function, etc.). Add concise comments where necessary. Your output should BE the final code block, with a brief explanation of the overall design.";
+const SYNTHESIZER_SYSTEM_INSTRUCTION = "You are a master synthesizer AI. You will receive multiple refined responses. Your task is to analyze, compare, and merge the best elements from each to create a single, comprehensive, and polished final answer. Ensure the final response is cohesive, well-organized, and directly addresses all aspects of the user's original query.\n\n**If the responses are code:** Synthesize the best elements from each solution to create a single, production-quality final version. Ensure the final code is complete and runnable, including all necessary boilerplate (imports, main function, etc.). Add concise comments where necessary. Your output should BE the final code block, with a brief explanation of the overall design.";
+const FINAL_REVIEW_SYSTEM_INSTRUCTION = "You are a final reviewer AI, the last quality gate before a response is sent to the user. You will receive a fully synthesized response. Your task is to perform a final check for clarity, coherence, conciseness, and tone. Make minor edits to fix grammatical errors, improve wording, and ensure the answer is polished and directly addresses the user's query. Do NOT make substantial changes or add new information. Your output should be the final, polished text.";
 
 interface Part {
   text?: string;
@@ -28,7 +29,9 @@ interface ProgressState {
   initial: boolean[];
   elaborating: boolean[];
   refining: boolean[];
-  synthesizing: boolean;
+  synthesizing: boolean[];
+  finalSynthesizing: boolean;
+  reviewing: boolean;
   verifying: boolean;
 }
 
@@ -38,6 +41,8 @@ const LoadingIndicator: FC<{ status: string; time: number, progress: ProgressSta
     if (status.startsWith('Elaborating')) return 'elaboration';
     if (status.startsWith('Refining')) return 'refining';
     if (status.startsWith('Synthesizing')) return 'synthesis';
+    if (status.startsWith('Finalizing')) return 'finalSynthesis';
+    if (status.startsWith('Performing final review')) return 'reviewing';
     if (status.startsWith('Verifying') || status.startsWith('Correcting')) return 'verification';
     return 'initial';
   };
@@ -58,7 +63,9 @@ const LoadingIndicator: FC<{ status: string; time: number, progress: ProgressSta
       {stage === 'initial' && <div className="progress-bars-container initial">{renderProgressBars(progress.initial.length, progress.initial)}</div>}
       {stage === 'elaboration' && <div className="progress-bars-container elaborating">{renderProgressBars(progress.elaborating.length, progress.elaborating)}</div>}
       {stage === 'refining' && <div className="progress-bars-container refining">{renderProgressBars(progress.refining.length, progress.refining)}</div>}
-      {stage === 'synthesis' && <div className="progress-bars-container synthesis">{renderProgressBars(1, progress.synthesizing)}</div>}
+      {stage === 'synthesis' && <div className="progress-bars-container synthesis">{renderProgressBars(progress.synthesizing.length, progress.synthesizing)}</div>}
+      {stage === 'finalSynthesis' && <div className="progress-bars-container final-synthesis">{renderProgressBars(1, progress.finalSynthesizing)}</div>}
+      {stage === 'reviewing' && <div className="progress-bars-container reviewing">{renderProgressBars(1, progress.reviewing)}</div>}
       {stage === 'verification' && <div className="progress-bars-container verification">{renderProgressBars(1, progress.verifying)}</div>}
     </div>
   );
@@ -293,11 +300,14 @@ const App: FC = () => {
     initial: [],
     elaborating: [],
     refining: [],
-    synthesizing: false,
+    synthesizing: [],
+    finalSynthesizing: false,
+    reviewing: false,
     verifying: false,
   });
   const [inputText, setInputText] = useState('');
   const [attachedFile, setAttachedFile] = useState<{ data: string; mimeType: string; name: string } | null>(null);
+  const [isDeepThink, setIsDeepThink] = useState<boolean>(false);
   
   const messageListRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -423,12 +433,16 @@ const App: FC = () => {
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!inputText.trim() && !attachedFile) return;
-    runOrchestration(4, false);
+
+    if (isDeepThink) {
+      runOrchestration(6, true);
+    } else {
+      runOrchestration(4, false);
+    }
   };
 
-  const handleDeepThinkClick = () => {
-      if (!inputText.trim() && !attachedFile) return;
-      runOrchestration(5, true);
+  const handleDeepThinkToggle = () => {
+    setIsDeepThink(prev => !prev);
   };
 
   const runOrchestration = async (numAgents: number, isDeepThink: boolean) => {
@@ -459,7 +473,9 @@ const App: FC = () => {
       initial: Array(numAgents).fill(false),
       elaborating: isDeepThink ? Array(numAgents).fill(false) : [],
       refining: Array(numAgents).fill(false),
-      synthesizing: false,
+      synthesizing: isDeepThink ? [false, false] : [false],
+      finalSynthesizing: false,
+      reviewing: false,
       verifying: false,
     });
 
@@ -533,21 +549,72 @@ const App: FC = () => {
       });
       await Promise.all(refinementAgentPromises);
 
-      // STAGE 4: SYNTHESIS
-      setLoadingStatus('Synthesizing final response...');
-      const synthesizerContext = `Here are the ${numAgents} refined responses. Synthesize them into the best single, final answer.\n\n` + refinedAnswers.map((ans, i) => `Refined ${i+1}:\n"${ans}"`).join('\n\n');
-      const synthesizerParts: Part[] = [...apiParts, {text: `\n\n---INTERNAL CONTEXT---\n${synthesizerContext}`}];
-      const synthesizerTurn: Content = { role: 'user', parts: synthesizerParts };
+      let finalSynthesizerResponseText = '';
 
-      const synthesizerResult = await ai.models.generateContent({ model: MODEL_NAME, contents: [...mainChatHistory, synthesizerTurn], config: { systemInstruction: SYNTHESIZER_SYSTEM_INSTRUCTION } });
-      setProgress(p => ({ ...p, synthesizing: true }));
+      if (isDeepThink) {
+          // STAGE 4: PARALLEL SYNTHESIS (DeepThink)
+          setLoadingStatus('Synthesizing responses...');
+          const firstHalf = refinedAnswers.slice(0, 3);
+          const secondHalf = refinedAnswers.slice(3, 6);
+          
+          const synthesizerPromise = (answers: string[], index: number) => {
+              const context = `Here are 3 refined responses. Synthesize them into the best single, cohesive answer.\n\n` + answers.map((ans, i) => `Refined ${i+1}:\n"${ans}"`).join('\n\n');
+              const parts: Part[] = [...apiParts, {text: `\n\n---INTERNAL CONTEXT---\n${context}`}];
+              const turn: Content = { role: 'user', parts: parts };
+              
+              return ai.models.generateContent({ model: MODEL_NAME, contents: [...mainChatHistory, turn], config: { systemInstruction: SYNTHESIZER_SYSTEM_INSTRUCTION } })
+                  .then(res => {
+                      setProgress(p => ({ ...p, synthesizing: p.synthesizing.map((s, idx) => idx === index ? true : s) }));
+                      return res.text;
+                  });
+          };
+
+          const synthesizedResults = await Promise.all([
+              synthesizerPromise(firstHalf, 0),
+              synthesizerPromise(secondHalf, 1)
+          ]);
+          
+          // STAGE 5: FINAL SYNTHESIS (DeepThink)
+          setLoadingStatus('Finalizing response...');
+          const finalSynthesizerContext = `Here are two synthesized responses from different agent groups. Your task is to analyze, compare, and merge the best elements from each to create a single, master response that is comprehensive and polished.\n\n---SYNTHESIZED RESPONSE 1---\n${synthesizedResults[0]}\n\n---SYNTHESIZED RESPONSE 2---\n${synthesizedResults[1]}`;
+          const finalSynthesizerParts: Part[] = [...apiParts, {text: `\n\n---INTERNAL CONTEXT---\n${finalSynthesizerContext}`}];
+          const finalSynthesizerTurn: Content = { role: 'user', parts: finalSynthesizerParts };
+          
+          const finalSynthesizerResult = await ai.models.generateContent({ model: MODEL_NAME, contents: [...mainChatHistory, finalSynthesizerTurn], config: { systemInstruction: SYNTHESIZER_SYSTEM_INSTRUCTION } });
+          setProgress(p => ({ ...p, finalSynthesizing: true }));
+          const synthesizedText = finalSynthesizerResult.text;
+
+          // STAGE 6: FINAL REVIEW (DeepThink)
+          setLoadingStatus('Performing final review...');
+          const reviewContext = `Perform a final quality review on the following response. Check for clarity, coherence, grammar, and tone. Make only minor edits to polish the text. The user's original query was: "${userInput}".\n\n---RESPONSE TO REVIEW---\n${synthesizedText}`;
+          const reviewTurn: Content = { role: 'user', parts: [{ text: reviewContext }] };
+          
+          const reviewResult = await ai.models.generateContent({
+            model: MODEL_NAME,
+            contents: [reviewTurn],
+            config: { systemInstruction: FINAL_REVIEW_SYSTEM_INSTRUCTION }
+          });
+          setProgress(p => ({ ...p, reviewing: true }));
+          finalSynthesizerResponseText = reviewResult.text;
+
+      } else {
+          // STAGE 4: SYNTHESIS (Standard)
+          setLoadingStatus('Synthesizing final response...');
+          const synthesizerContext = `Here are the ${numAgents} refined responses. Synthesize them into the best single, final answer.\n\n` + refinedAnswers.map((ans, i) => `Refined ${i+1}:\n"${ans}"`).join('\n\n');
+          const synthesizerParts: Part[] = [...apiParts, {text: `\n\n---INTERNAL CONTEXT---\n${synthesizerContext}`}];
+          const synthesizerTurn: Content = { role: 'user', parts: synthesizerParts };
+
+          const synthesizerResult = await ai.models.generateContent({ model: MODEL_NAME, contents: [...mainChatHistory, synthesizerTurn], config: { systemInstruction: SYNTHESIZER_SYSTEM_INSTRUCTION } });
+          setProgress(p => ({ ...p, synthesizing: [true] }));
+          finalSynthesizerResponseText = synthesizerResult.text;
+      }
       
-      let finalResponseText = synthesizerResult.text;
+      let finalResponseText = finalSynthesizerResponseText;
       const codeBlockRegex = /```(\w+)\n([\s\S]*?)```/g;
       let match;
       let hasCorrected = false;
 
-      while ((match = codeBlockRegex.exec(synthesizerResult.text)) !== null && !hasCorrected) {
+      while ((match = codeBlockRegex.exec(finalSynthesizerResponseText)) !== null && !hasCorrected) {
           const lang = match[1];
           const code = match[2];
           const syntaxError = await checkCodeSyntax(lang, code);
@@ -567,7 +634,7 @@ ERROR MESSAGE: ${syntaxError}
               
               const correctedCode = verificationResult.text;
               // Replace only the single incorrect code block
-              finalResponseText = synthesizerResult.text.replace(match[0], correctedCode);
+              finalResponseText = finalSynthesizerResponseText.replace(match[0], correctedCode);
               setProgress(p => ({ ...p, verifying: true }));
               hasCorrected = true; // Only correct the first error found
           }
@@ -669,8 +736,17 @@ ERROR MESSAGE: ${syntaxError}
                 <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z"/>
               </svg>
             </button>
-            <button type="button" onClick={handleDeepThinkClick} disabled={isLoading || (!inputText.trim() && !attachedFile)} className="deep-think-button" aria-label="Deep think">
-                <svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 0 24 24" width="24px" fill="currentColor"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M13.5 7c-2.22 0-4.04 1.63-4.42 3.75C8.33 11.23 8 11.89 8 12.63V13h8v-2.12c0-1.45-1.18-2.75-2.63-2.87C12.5 7.42 11.84 7 11 7c-.55 0-1.07.22-1.46.59c-.43.4-.64.95-.54 1.53c.12.74.82 1.38 1.62 1.38c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5c-.32 0-.62.1-.87.28C8.83 8.33 9.85 7 11.33 7H12v2.12c0 1.45 1.18 2.75 2.63 2.87c.87.07 1.37-.2 1.37-.2s.5.13 1.37.2c1.45.12 2.63-1.18 2.63-2.63V11c0-2.21-1.79-4-4-4h-1.5zm-3.17 6.02c-.17.02-.33.02-.5.02c-1.11 0-2.11-.45-2.83-1.17S5 12.64 5 11.53c0-1.4.84-2.6 2-3.15C7.07 7.9 7.5 7.47 7.5 7c0-.28-.22-.5-.5-.5s-.5.22-.5.5c0 .05-.12.52-.12.52S6.28 7.4 6.28 7.4c-1.48.6-2.5,2.15-2.5,3.9c0 1.48.74 2.79 1.87 3.56C6.72 15.6 8.35 16 10.12 16c.15 0 .29 0 .44-.02c-.93-.5-1.57-1.45-1.73-2.58zM10.5 7c.55 0 1.07.22 1.46.59c.43.4.64.95.54 1.53c-.12.74-.82 1.38-1.62 1.38c-.83 0-1.5-.67-1.5-1.5c0-.83.67-1.5 1.5-1.5z"/></svg>
+            <button 
+              type="button" 
+              onClick={handleDeepThinkToggle} 
+              disabled={isLoading} 
+              className={`deep-think-button ${isDeepThink ? 'selected' : ''}`} 
+              aria-label="Toggle DeepThink mode"
+              title="DeepThink"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="24px" height="24px">
+                  <path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"/>
+                </svg>
             </button>
             <button type="submit" disabled={isLoading || (!inputText.trim() && !attachedFile)} aria-label="Send message">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
