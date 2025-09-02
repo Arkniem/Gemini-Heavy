@@ -5,7 +5,7 @@ import { GoogleGenAI, Content } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-const MODEL_NAME = 'gemini-2.5-flash';
+const MODEL_NAME = 'gemini-2.5-pro';
 const INITIAL_SYSTEM_INSTRUCTION = "You are a foundational AI agent. Your goal is to provide a strong, initial response to the user's query, whatever the topic. Break down the request, identify the core requirements, and generate a clear, well-structured starting point. This could be an outline, a basic explanation, or a foundational concept.\n\n**If the user's request involves coding:** Provide a foundational code structure or algorithm. Your code should be clean, well-commented, and directly address the core problem. Explain your approach briefly. Your response is the first step for a team of AI agents, so clarity and correctness are paramount.";
 const REFINEMENT_SYSTEM_INSTRUCTION = "You are a critical analysis and refinement AI. You will receive an initial response. Your task is to critically evaluate it. Identify logical fallacies, find missing details, consider alternative perspectives, and improve the overall quality and accuracy of the response. Explain the specific changes you made and why they are improvements.\n\n**If the content is code:** Your task is to identify bugs, logical errors, edge cases, or areas for optimization. Refactor and improve the provided code, explaining the specific changes you made and why they are necessary. Your goal is to produce a more robust and efficient version of the code.";
 const CRITIQUE_AGENT_SYSTEM_INSTRUCTION = "You are a critical reviewer. You will be given an initial user query and a proposed response from another AI agent. Your sole task is to analyze the response and provide a concise, constructive critique. Identify specific weaknesses, logical fallacies, missing information, or potential inaccuracies. Do NOT write your own full response to the user. Your output should be ONLY the critique.";
@@ -559,7 +559,9 @@ const App: FC = () => {
         setLoadingStatus('Revising based on feedback...');
         const finalRevisedAnswers = Array(numAgents).fill('');
         const revisionPromises = refinedAnswers.map((originalAnswer, index) => {
-          const peerCritique = critiques[index];
+          // Get the critique from the agent who reviewed this one's work.
+          // The `+ numAgents` prevents a negative result for the first agent (index 0).
+          const peerCritique = critiques[(index - 1 + numAgents) % numAgents];
           const revisionContext = `Here was your original response:\n\n---ORIGINAL---\n${originalAnswer}\n\nHere is a critique from a peer:\n\n---CRITIQUE---\n${peerCritique}\n\nBased on the critique, provide an improved response to the original query.`;
           const revisionParts: Part[] = [...apiParts, { text: `\n\n---INTERNAL CONTEXT---\n${revisionContext}` }];
           const revisionTurn: Content = { role: 'user', parts: revisionParts };
@@ -618,7 +620,7 @@ const App: FC = () => {
           
           const reviewResult = await ai.models.generateContent({
             model: MODEL_NAME,
-            contents: [reviewTurn],
+            contents: [...mainChatHistory, reviewTurn],
             config: { systemInstruction: FINAL_REVIEW_SYSTEM_INSTRUCTION }
           });
           setProgress(p => ({ ...p, reviewing: true }));
@@ -655,7 +657,7 @@ ERROR MESSAGE: ${syntaxError}
               const verifierTurn: Content = { role: 'user', parts: [{ text: `Correct the following code:\n\n\`\`\`${lang}\n${code}\n\`\`\`` }] };
               const verificationResult = await ai.models.generateContent({
                   model: MODEL_NAME,
-                  contents: [verifierTurn],
+                  contents: [...mainChatHistory, verifierTurn],
                   config: { systemInstruction: VERIFIER_SYSTEM_INSTRUCTION_DYNAMIC }
               });
               
