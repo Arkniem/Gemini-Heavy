@@ -7,8 +7,9 @@ import remarkGfm from 'remark-gfm';
 
 const MODEL_NAME = 'gemini-2.5-flash';
 const INITIAL_SYSTEM_INSTRUCTION = "You are a foundational AI agent. Your goal is to provide a strong, initial response to the user's query, whatever the topic. Break down the request, identify the core requirements, and generate a clear, well-structured starting point. This could be an outline, a basic explanation, or a foundational concept.\n\n**If the user's request involves coding:** Provide a foundational code structure or algorithm. Your code should be clean, well-commented, and directly address the core problem. Explain your approach briefly. Your response is the first step for a team of AI agents, so clarity and correctness are paramount.";
-const ELABORATION_SYSTEM_INSTRUCTION = "You are an elaboration and expansion AI. You will receive a foundational response to a user's query. Your task is to build upon this response, adding more detail, providing concrete examples, exploring related concepts, and generally making the answer more comprehensive and useful. Your goal is to expand, not to critique or change the core idea of the initial response.";
 const REFINEMENT_SYSTEM_INSTRUCTION = "You are a critical analysis and refinement AI. You will receive an initial response. Your task is to critically evaluate it. Identify logical fallacies, find missing details, consider alternative perspectives, and improve the overall quality and accuracy of the response. Explain the specific changes you made and why they are improvements.\n\n**If the content is code:** Your task is to identify bugs, logical errors, edge cases, or areas for optimization. Refactor and improve the provided code, explaining the specific changes you made and why they are necessary. Your goal is to produce a more robust and efficient version of the code.";
+const CRITIQUE_AGENT_SYSTEM_INSTRUCTION = "You are a critical reviewer. You will be given an initial user query and a proposed response from another AI agent. Your sole task is to analyze the response and provide a concise, constructive critique. Identify specific weaknesses, logical fallacies, missing information, or potential inaccuracies. Do NOT write your own full response to the user. Your output should be ONLY the critique.";
+const REVISION_AGENT_SYSTEM_INSTRUCTION = "You are a revision specialist. You will receive your original response, a user's query, and a critique of your response from a peer AI. Your task is to generate a new, improved final version of your response that directly addresses the points raised in the critique. Integrate the valid feedback to make your answer more accurate, complete, and well-reasoned.";
 const SYNTHESIZER_SYSTEM_INSTRUCTION = "You are a master synthesizer AI. You will receive multiple refined responses. Your task is to analyze, compare, and merge the best elements from each to create a single, comprehensive, and polished final answer. Ensure the final response is cohesive, well-organized, and directly addresses all aspects of the user's original query.\n\n**If the responses are code:** Synthesize the best elements from each solution to create a single, production-quality final version. Ensure the final code is complete and runnable, including all necessary boilerplate (imports, main function, etc.). Add concise comments where necessary. Your output should BE the final code block, with a brief explanation of the overall design.";
 const FINAL_REVIEW_SYSTEM_INSTRUCTION = "You are a final reviewer AI, the last quality gate before a response is sent to the user. You will receive a fully synthesized response. Your task is to perform a final check for clarity, coherence, conciseness, and tone. Make minor edits to fix grammatical errors, improve wording, and ensure the answer is polished and directly addresses the user's query. Do NOT make substantial changes or add new information. Your output should be the final, polished text.";
 
@@ -27,8 +28,9 @@ interface Message {
 
 interface ProgressState {
   initial: boolean[];
-  elaborating: boolean[];
   refining: boolean[];
+  critiquing: boolean[];
+  revising: boolean[];
   synthesizing: boolean[];
   finalSynthesizing: boolean;
   reviewing: boolean;
@@ -38,8 +40,9 @@ interface ProgressState {
 const LoadingIndicator: FC<{ status: string; time: number, progress: ProgressState }> = ({ status, time, progress }) => {
   const getStage = () => {
     if (status.startsWith('Initializing')) return 'initial';
-    if (status.startsWith('Elaborating')) return 'elaboration';
     if (status.startsWith('Refining')) return 'refining';
+    if (status.startsWith('Critiquing')) return 'critiquing';
+    if (status.startsWith('Revising')) return 'revising';
     if (status.startsWith('Synthesizing')) return 'synthesis';
     if (status.startsWith('Finalizing')) return 'finalSynthesis';
     if (status.startsWith('Performing final review')) return 'reviewing';
@@ -61,8 +64,9 @@ const LoadingIndicator: FC<{ status: string; time: number, progress: ProgressSta
         <span className="timer-display">{(time / 1000).toFixed(1)}s</span>
       </div>
       {stage === 'initial' && <div className="progress-bars-container initial">{renderProgressBars(progress.initial.length, progress.initial)}</div>}
-      {stage === 'elaboration' && <div className="progress-bars-container elaborating">{renderProgressBars(progress.elaborating.length, progress.elaborating)}</div>}
       {stage === 'refining' && <div className="progress-bars-container refining">{renderProgressBars(progress.refining.length, progress.refining)}</div>}
+      {stage === 'critiquing' && <div className="progress-bars-container critiquing">{renderProgressBars(progress.critiquing.length, progress.critiquing)}</div>}
+      {stage === 'revising' && <div className="progress-bars-container revising">{renderProgressBars(progress.revising.length, progress.revising)}</div>}
       {stage === 'synthesis' && <div className="progress-bars-container synthesis">{renderProgressBars(progress.synthesizing.length, progress.synthesizing)}</div>}
       {stage === 'finalSynthesis' && <div className="progress-bars-container final-synthesis">{renderProgressBars(1, progress.finalSynthesizing)}</div>}
       {stage === 'reviewing' && <div className="progress-bars-container reviewing">{renderProgressBars(1, progress.reviewing)}</div>}
@@ -298,8 +302,9 @@ const App: FC = () => {
   const [executionCode, setExecutionCode] = useState<{ language: string; code: string } | null>(null);
   const [progress, setProgress] = useState<ProgressState>({
     initial: [],
-    elaborating: [],
     refining: [],
+    critiquing: [],
+    revising: [],
     synthesizing: [],
     finalSynthesizing: false,
     reviewing: false,
@@ -471,8 +476,9 @@ const App: FC = () => {
     setIsLoading(true);
     setProgress({
       initial: Array(numAgents).fill(false),
-      elaborating: isDeepThink ? Array(numAgents).fill(false) : [],
       refining: Array(numAgents).fill(false),
+      critiquing: isDeepThink ? Array(numAgents).fill(false) : [],
+      revising: isDeepThink ? Array(numAgents).fill(false) : [],
       synthesizing: isDeepThink ? [false, false] : [false],
       finalSynthesizing: false,
       reviewing: false,
@@ -505,34 +511,11 @@ const App: FC = () => {
       );
       await Promise.all(initialAgentPromises);
 
-      let stage2Answers = initialAnswers;
-
-      // STAGE 2: ELABORATION (DeepThink only)
-      if (isDeepThink) {
-        setLoadingStatus('Elaborating responses...');
-        const elaboratedAnswers = Array(numAgents).fill('');
-        const elaborationAgentPromises = initialAnswers.map((initialAnswer, index) => {
-          const elaborationContext = `Here is a foundational response to the user's query. Please expand on it in detail.\n\n---FOUNDATIONAL RESPONSE---\n${initialAnswer}`;
-          const elaborationParts: Part[] = [...apiParts, {text: `\n\n---INTERNAL CONTEXT---\n${elaborationContext}`}];
-          const elaborationTurn: Content = { role: 'user', parts: elaborationParts };
-
-          return ai.models.generateContent({
-            model: MODEL_NAME, contents: [...mainChatHistory, elaborationTurn], config: { systemInstruction: ELABORATION_SYSTEM_INSTRUCTION }
-          }).then(res => {
-            elaboratedAnswers[index] = res.text;
-            setProgress(p => ({ ...p, elaborating: p.elaborating.map((s, idx) => idx === index ? true : s) }));
-            return res;
-          });
-        });
-        await Promise.all(elaborationAgentPromises);
-        stage2Answers = elaboratedAnswers;
-      }
-
       // STAGE 3: REFINEMENT
       setLoadingStatus('Refining answers...');
       const refinedAnswers = Array(numAgents).fill('');
-      const refinementAgentPromises = stage2Answers.map((currentAnswer, index) => {
-        const otherAnswers = stage2Answers.filter((_, i) => i !== index);
+      const refinementAgentPromises = initialAnswers.map((currentAnswer, index) => {
+        const otherAnswers = initialAnswers.filter((_, i) => i !== index);
         const otherAnswersContext = otherAnswers.map((ans, i) => `${i + 1}. "${ans}"`).join('\n');
         const refinementContext = `The response I'm working with is: "${currentAnswer}". The other agents responded with:\n${otherAnswersContext}\n\nBased on this context, critically re-evaluate and provide a new, improved response to the original query.`;
         
@@ -548,14 +531,58 @@ const App: FC = () => {
         });
       });
       await Promise.all(refinementAgentPromises);
+      
+      let answersForSynthesis = refinedAnswers;
+
+      // STAGES 3.5 & 3.6: CRITIQUE & REVISION (DeepThink only)
+      if (isDeepThink) {
+        // STAGE 3.5: CRITIQUE ROUND
+        setLoadingStatus('Critiquing responses...');
+        const critiques = Array(numAgents).fill('');
+        const critiquePromises = refinedAnswers.map((_, index) => {
+          const peerAnswer = refinedAnswers[(index + 1) % numAgents];
+          const critiqueContext = `The user's query was: "${userInput}". Here is the response to critique:\n\n---RESPONSE---\n${peerAnswer}`;
+          const critiqueParts: Part[] = [...apiParts, { text: `\n\n---INTERNAL CONTEXT---\n${critiqueContext}` }];
+          const critiqueTurn: Content = { role: 'user', parts: critiqueParts };
+
+          return ai.models.generateContent({
+            model: MODEL_NAME, contents: [...mainChatHistory, critiqueTurn], config: { systemInstruction: CRITIQUE_AGENT_SYSTEM_INSTRUCTION }
+          }).then(res => {
+            critiques[index] = res.text;
+            setProgress(p => ({ ...p, critiquing: p.critiquing.map((s, idx) => idx === index ? true : s) }));
+            return res;
+          });
+        });
+        await Promise.all(critiquePromises);
+      
+        // STAGE 3.6: FINAL REVISION ROUND
+        setLoadingStatus('Revising based on feedback...');
+        const finalRevisedAnswers = Array(numAgents).fill('');
+        const revisionPromises = refinedAnswers.map((originalAnswer, index) => {
+          const peerCritique = critiques[index];
+          const revisionContext = `Here was your original response:\n\n---ORIGINAL---\n${originalAnswer}\n\nHere is a critique from a peer:\n\n---CRITIQUE---\n${peerCritique}\n\nBased on the critique, provide an improved response to the original query.`;
+          const revisionParts: Part[] = [...apiParts, { text: `\n\n---INTERNAL CONTEXT---\n${revisionContext}` }];
+          const revisionTurn: Content = { role: 'user', parts: revisionParts };
+
+          return ai.models.generateContent({
+            model: MODEL_NAME, contents: [...mainChatHistory, revisionTurn], config: { systemInstruction: REVISION_AGENT_SYSTEM_INSTRUCTION }
+          }).then(res => {
+            finalRevisedAnswers[index] = res.text;
+            setProgress(p => ({ ...p, revising: p.revising.map((s, idx) => idx === index ? true : s) }));
+            return res;
+          });
+        });
+        await Promise.all(revisionPromises);
+        answersForSynthesis = finalRevisedAnswers;
+      }
 
       let finalSynthesizerResponseText = '';
 
       if (isDeepThink) {
           // STAGE 4: PARALLEL SYNTHESIS (DeepThink)
           setLoadingStatus('Synthesizing responses...');
-          const firstHalf = refinedAnswers.slice(0, 3);
-          const secondHalf = refinedAnswers.slice(3, 6);
+          const firstHalf = answersForSynthesis.slice(0, 3);
+          const secondHalf = answersForSynthesis.slice(3, 6);
           
           const synthesizerPromise = (answers: string[], index: number) => {
               const context = `Here are 3 refined responses. Synthesize them into the best single, cohesive answer.\n\n` + answers.map((ans, i) => `Refined ${i+1}:\n"${ans}"`).join('\n\n');
@@ -600,7 +627,7 @@ const App: FC = () => {
       } else {
           // STAGE 4: SYNTHESIS (Standard)
           setLoadingStatus('Synthesizing final response...');
-          const synthesizerContext = `Here are the ${numAgents} refined responses. Synthesize them into the best single, final answer.\n\n` + refinedAnswers.map((ans, i) => `Refined ${i+1}:\n"${ans}"`).join('\n\n');
+          const synthesizerContext = `Here are the ${numAgents} refined responses. Synthesize them into the best single, final answer.\n\n` + answersForSynthesis.map((ans, i) => `Refined ${i+1}:\n"${ans}"`).join('\n\n');
           const synthesizerParts: Part[] = [...apiParts, {text: `\n\n---INTERNAL CONTEXT---\n${synthesizerContext}`}];
           const synthesizerTurn: Content = { role: 'user', parts: synthesizerParts };
 

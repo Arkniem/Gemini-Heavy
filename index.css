@@ -256,10 +256,12 @@ header h1 {
 
 .progress-bars-container.initial .progress-bar { background-color: #d1e3ff; }
 .progress-bars-container.initial .progress-bar::after { background-color: #0b57d0; }
-.progress-bars-container.elaborating .progress-bar { background-color: #e6f4ea; }
-.progress-bars-container.elaborating .progress-bar::after { background-color: #34a853; }
 .progress-bars-container.refining .progress-bar { background-color: #feefc3; }
 .progress-bars-container.refining .progress-bar::after { background-color: #f9ab00; }
+.progress-bars-container.critiquing .progress-bar { background-color: #fce8e6; }
+.progress-bars-container.critiquing .progress-bar::after { background-color: #d93025; }
+.progress-bars-container.revising .progress-bar { background-color: #e8eaf6; }
+.progress-bars-container.revising .progress-bar::after { background-color: #3f51b5; }
 .progress-bars-container.synthesis .progress-bar { background-color: #fdd8b8; }
 .progress-bars-container.synthesis .progress-bar::after { background-color: #ef6c00; }
 .progress-bars-container.final-synthesis .progress-bar { background-color: #d1c4e9; }
