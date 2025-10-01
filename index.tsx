@@ -1,11 +1,12 @@
-
 import React, { useState, useEffect, useRef, FormEvent, FC, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { GoogleGenAI, Content } from '@google/genai';
+import { GoogleGenAI, Content, Type } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-const MODEL_NAME = 'gemini-2.5-pro';
+declare var mermaid: any;
+
+const MODEL_NAME = 'gemini-2.5-flash';
 const INITIAL_SYSTEM_INSTRUCTION = "You are a foundational AI agent. Your goal is to provide a strong, initial response to the user's query, whatever the topic. Break down the request, identify the core requirements, and generate a clear, well-structured starting point. This could be an outline, a basic explanation, or a foundational concept.\n\n**If the user's request involves coding:** Provide a foundational code structure or algorithm. Your code should be clean, well-commented, and directly address the core problem. Explain your approach briefly. Your response is the first step for a team of AI agents, so clarity and correctness are paramount.";
 const REFINEMENT_SYSTEM_INSTRUCTION = "You are a critical analysis and refinement AI. You will receive an initial response. Your task is to critically evaluate it. Identify logical fallacies, find missing details, consider alternative perspectives, and improve the overall quality and accuracy of the response. Explain the specific changes you made and why they are improvements.\n\n**If the content is code:** Your task is to identify bugs, logical errors, edge cases, or areas for optimization. Refactor and improve the provided code, explaining the specific changes you made and why they are necessary. Your goal is to produce a more robust and efficient version of the code.";
 const CRITIQUE_AGENT_SYSTEM_INSTRUCTION = "You are a critical reviewer. You will be given an initial user query and a proposed response from another AI agent. Your sole task is to analyze the response and provide a concise, constructive critique. Identify specific weaknesses, logical fallacies, missing information, or potential inaccuracies. Do NOT write your own full response to the user. Your output should be ONLY the critique.";
@@ -35,6 +36,27 @@ interface ProgressState {
   finalSynthesizing: boolean;
   reviewing: boolean;
   verifying: boolean;
+}
+
+interface AgentResponses {
+  initial: string[];
+  refined: string[];
+  critiques: string[];
+  revised: string[];
+  synthesized: string[];
+  finalSynthesized: string;
+  reviewed: string;
+  correctedCode: string;
+}
+
+interface SelectedNode {
+    title: string;
+    content: string;
+}
+
+interface ExamplePrompt {
+  title: string;
+  fullPrompt: string;
 }
 
 const LoadingIndicator: FC<{ status: string; time: number, progress: ProgressState }> = ({ status, time, progress }) => {
@@ -76,11 +98,18 @@ const LoadingIndicator: FC<{ status: string; time: number, progress: ProgressSta
 };
 
 const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => void }> = ({ language, code, onClose }) => {
+  const [editableCode, setEditableCode] = useState<string>(code);
   const [output, setOutput] = useState<string>('');
   const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<'console' | 'debugger'>('console');
+  const [isDebugging, setIsDebugging] = useState<boolean>(false);
+  const [debugResult, setDebugResult] = useState<{ explanation: string; fixedCode: string } | null>(null);
+
   const outputRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
-
+  
+  const runnableLanguages = ['python', 'py', 'javascript', 'js', 'html'];
+  const isRunnable = runnableLanguages.includes(language.toLowerCase());
   const isHtml = language === 'html';
 
   const extractCode = (htmlString: string) => {
@@ -89,23 +118,25 @@ const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => 
     const scripts = doc.querySelectorAll('script');
     let code = '';
     scripts.forEach(script => {
-      // Don't run external scripts in this basic environment
       if (!script.src) {
         code += script.innerHTML + '\n';
       }
     });
-    // For things like pygame.js that might not use a script tag but a specific div
     if(code === '') {
         const bodyContent = doc.body.innerHTML;
-        // Super basic check for non-script-based executable content
         if(htmlString.includes('pygame')) return htmlString;
     }
     return code;
   };
 
   const handleRun = async () => {
+    if (!isRunnable) {
+        setOutput(`[INFO] Language '${language}' is not runnable in this browser environment.`);
+        return;
+    }
     setIsRunning(true);
     setOutput('');
+    setActiveTab('console');
     if (outputRef.current) {
       outputRef.current.innerHTML = '';
     }
@@ -114,6 +145,30 @@ const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => 
       switch (language) {
         case 'python':
         case 'py':
+          if (editableCode.includes('import pygame')) {
+              setOutput(`[INFO] The 'pygame' library is not supported in this browser-based environment. It relies on native system components that are not available here.
+
+For creating graphics and simple games, you might want to try the 'turtle' module, which is fully supported.
+
+Example 'turtle' code:
+import turtle
+
+screen = turtle.Screen()
+screen.title("My Turtle Graphics")
+
+t = turtle.Turtle()
+t.shape("turtle")
+t.color("green")
+
+for _ in range(4):
+    t.forward(100)
+    t.right(90)
+
+turtle.done()
+`);
+              setIsRunning(false);
+              return;
+          }
           if (!(window as any).Sk) {
              setOutput('[ERROR] Skulpt (Python interpreter) is not loaded.');
              break;
@@ -127,7 +182,7 @@ const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => 
             }
           });
           await (window as any).Sk.misceval.asyncToPromise(() =>
-            (window as any).Sk.importMainWithBody("<stdin>", false, code, true)
+            (window as any).Sk.importMainWithBody("<stdin>", false, editableCode, true)
           );
           break;
         case 'javascript':
@@ -138,7 +193,7 @@ const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => 
           console.warn = (...args) => logs.push(`[WARN] ${args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' ')}`);
           console.error = (...args) => logs.push(`[ERROR] ${args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' ')}`);
           try {
-            const result = new Function(code)();
+            const result = new Function(editableCode)();
             if (result !== undefined) logs.push(`=> ${JSON.stringify(result, null, 2)}`);
           } catch (e: any) {
             logs.push(`[EXECUTION ERROR] ${e.message}`);
@@ -152,21 +207,18 @@ const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => 
         case 'html':
             if (outputRef.current) {
                 const iframe = document.createElement('iframe');
-                // Check for script tags and decide what to render
-                const scriptContent = extractCode(code);
-                if (scriptContent.includes('pygame')) { // Special handling for pygame.js
-                     iframe.srcdoc = code;
+                const scriptContent = extractCode(editableCode);
+                if (scriptContent.includes('pygame')) {
+                     iframe.srcdoc = editableCode;
                 } else if (scriptContent) {
-                    // It's just JS, run it like JS
                     handleRunJS(scriptContent);
-                    return; // exit early
+                    return;
                 } else {
-                    // It's just markup, render it
-                    iframe.srcdoc = code;
+                    iframe.srcdoc = editableCode;
                 }
                 iframe.className = 'render-iframe';
                 iframe.sandbox.add('allow-scripts', 'allow-same-origin');
-                outputRef.current.innerHTML = ''; // Clear previous output
+                outputRef.current.innerHTML = '';
                 outputRef.current.appendChild(iframe);
               }
           break;
@@ -180,12 +232,10 @@ const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => 
     }
   };
   
-    // Helper to run JS extracted from HTML
   const handleRunJS = (jsCode: string) => {
       const logs: string[] = [];
       const originalConsole = { log: console.log, warn: console.warn, error: console.error };
       console.log = (...args) => logs.push(args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' '));
-      // ... same as JS case
       try {
         const result = new Function(jsCode)();
         if (result !== undefined) logs.push(`=> ${JSON.stringify(result, null, 2)}`);
@@ -199,6 +249,59 @@ const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => 
       }
   };
 
+  const handleDebug = async () => {
+    setIsDebugging(true);
+    setDebugResult(null);
+    setActiveTab('debugger');
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+        const prompt = `You are an expert code debugger. Analyze the following ${language} code, identify any bugs or potential issues, and provide a fix. If there is console output from a previous run, use it to help diagnose the problem. Format your response as a JSON object with two keys: "explanation" (a step-by-step explanation of the problem and the fix, formatted as markdown) and "fixedCode" (the complete, corrected code block).
+
+---
+LANGUAGE: ${language}
+---
+CODE:
+\`\`\`${language}
+${editableCode}
+\`\`\`
+---
+CONSOLE OUTPUT:
+${output || 'No output from previous run.'}
+---`;
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        explanation: { type: Type.STRING, description: "A detailed but clear explanation of the bug(s) found and the reasoning behind the fix. Format this as markdown." },
+                        fixedCode: { type: Type.STRING, description: "The complete, corrected, and runnable version of the code." }
+                    }
+                }
+            }
+        });
+        
+        const result = JSON.parse(response.text);
+        setDebugResult(result);
+    } catch (err: any) {
+        setDebugResult({
+            explanation: `An error occurred while debugging: ${err.message}`,
+            fixedCode: editableCode
+        });
+    } finally {
+        setIsDebugging(false);
+    }
+  };
+
+  const handleApplyFix = () => {
+    if (debugResult) {
+        setEditableCode(debugResult.fixedCode);
+        setActiveTab('console');
+    }
+  };
 
   const handleFullScreen = () => {
     if (canvasRef.current) {
@@ -228,8 +331,11 @@ const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => 
         <div className="canvas-header">
           <span className="language-tag">{language}</span>
           <div className="canvas-buttons">
-            <button onClick={handleRun} disabled={isRunning} className="run-button">
+            <button onClick={handleRun} disabled={isRunning || !isRunnable} className="run-button" title={isRunnable ? "Run code" : "This language cannot be run in the browser"}>
               {isRunning ? 'Running...' : 'Run'}
+            </button>
+            <button onClick={handleDebug} disabled={isDebugging} className="run-button">
+              {isDebugging ? 'Debugging...' : 'Debug with AI'}
             </button>
              <button onClick={handleFullScreen} className="canvas-control-button" aria-label="Toggle fullscreen">
                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
@@ -240,12 +346,43 @@ const ExecutionEnvironment: FC<{ language: string; code: string; onClose: () => 
           </div>
         </div>
         <div className="canvas-body">
-            <pre className="code-area"><code>{code}</code></pre>
+            <textarea 
+              className="code-area"
+              value={editableCode}
+              onChange={(e) => setEditableCode(e.target.value)}
+              spellCheck="false"
+              aria-label="Code editor"
+            />
             <div className="output-container">
-              <div className="output-header">Output</div>
-              <div ref={outputRef} className="output-content">
-                {!isHtml && <pre>{output}</pre>}
+              <div className="canvas-tabs">
+                <button className={`canvas-tab ${activeTab === 'console' ? 'active' : ''}`} onClick={() => setActiveTab('console')}>Console</button>
+                <button className={`canvas-tab ${activeTab === 'debugger' ? 'active' : ''}`} onClick={() => setActiveTab('debugger')}>Debugger</button>
               </div>
+              {activeTab === 'console' && (
+                  <div className="output-content" ref={outputRef}>
+                    {!isHtml && <pre>{output}</pre>}
+                  </div>
+              )}
+              {activeTab === 'debugger' && (
+                  <div className="debugger-content">
+                      {isDebugging && <div className="debugger-loading">Asking AI for help...</div>}
+                      {debugResult && !isDebugging && (
+                          <div className="debugger-result">
+                              <h3>Explanation</h3>
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>{debugResult.explanation}</ReactMarkdown>
+                              <h3>Suggested Fix</h3>
+                              <div className="code-block-wrapper">
+                                <div className="code-block-header">
+                                  <span className="language-tag">{language}</span>
+                                  <button onClick={handleApplyFix} className="run-button">Apply Fix</button>
+                                </div>
+                                <pre><code>{debugResult.fixedCode}</code></pre>
+                              </div>
+                          </div>
+                      )}
+                      {!isDebugging && !debugResult && <div className="debugger-placeholder">Click the "Debug with AI" button to analyze your code.</div>}
+                  </div>
+              )}
             </div>
         </div>
       </div>
@@ -291,6 +428,267 @@ const CodeBlock: FC<{ language: string; code: string; onExecute: () => void }> =
   );
 };
 
+const AgentResponseViewer: FC<{ data: SelectedNode; onClose: () => void }> = ({ data, onClose }) => {
+    useEffect(() => {
+        const handleEsc = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                onClose();
+            }
+        };
+        window.addEventListener('keydown', handleEsc);
+        return () => window.removeEventListener('keydown', handleEsc);
+    }, [onClose]);
+
+    return (
+        <div className="agent-response-overlay" onClick={onClose}>
+            <div className="agent-response-modal" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <h2>{data.title}</h2>
+                    <button onClick={onClose} aria-label="Close response viewer">&times;</button>
+                </div>
+                <div className="modal-content">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.content}</ReactMarkdown>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const ProcessView: FC<{
+    isDeepThink: boolean;
+    isProcessing: boolean;
+    progress: ProgressState;
+    loadingStatus: string;
+    agentResponses: AgentResponses | null;
+    onNodeClick: (stage: string, index: number) => void;
+}> = ({ isDeepThink, isProcessing, progress, loadingStatus, agentResponses, onNodeClick }) => {
+    const mermaidContainerRef = useRef<HTMLDivElement>(null);
+
+    const standardGraph = `
+        graph TD
+            U(User Query)
+
+            subgraph S_Init [Stage 1: Initialization]
+                direction LR
+                init_0("Agent 1<br/>Initializer"); init_1("Agent 2<br/>Initializer"); init_2("Agent 3<br/>Initializer"); init_3("Agent 4<br/>Initializer")
+            end
+
+            subgraph S_Refine [Stage 2: Refinement]
+                direction LR
+                refine_0("Agent 1<br/>Refiner"); refine_1("Agent 2<br/>Refiner"); refine_2("Agent 3<br/>Refiner"); refine_3("Agent 4<br/>Refiner")
+            end
+
+            subgraph S_Synth [Stage 3: Synthesis]
+                synth_final(Synthesizer)
+            end
+
+            subgraph S_Verify [Stage 4: Verification]
+                verify_0{Code Error?}; correct_0(Corrector)
+            end
+            
+            subgraph S_Output [Output]
+                F(Final Response)
+            end
+
+            U --> init_0 & init_1 & init_2 & init_3
+
+            init_0 & init_1 & init_2 & init_3 --> init_collector(" ")
+            style init_collector fill:none,stroke:none
+            init_collector --> refine_0 & refine_1 & refine_2 & refine_3
+
+            refine_0 & refine_1 & refine_2 & refine_3 --> synth_final
+
+            synth_final --> verify_0
+            verify_0 -- Yes --> correct_0
+            correct_0 --> F
+            verify_0 -- No --> F
+    `;
+
+    const deepThinkGraph = `
+        graph TD
+            U(User Query)
+
+            subgraph S1 [Stage 1: Initialization]
+                direction LR
+                init_0("Agent 1<br/>Initializer"); init_1("Agent 2<br/>Initializer"); init_2("Agent 3<br/>Initializer"); init_3("Agent 4<br/>Initializer"); init_4("Agent 5<br/>Initializer"); init_5("Agent 6<br/>Initializer")
+            end
+
+            subgraph S2 [Stage 2: Refinement]
+                direction LR
+                refine_0("Agent 1<br/>Refiner"); refine_1("Agent 2<br/>Refiner"); refine_2("Agent 3<br/>Refiner"); refine_3("Agent 4<br/>Refiner"); refine_4("Agent 5<br/>Refiner"); refine_5("Agent 6<br/>Refiner")
+            end
+
+            subgraph S3 [Stage 3: Critique]
+                direction LR
+                critique_0("Agent 1<br/>Critique"); critique_1("Agent 2<br/>Critique"); critique_2("Agent 3<br/>Critique"); critique_3("Agent 4<br/>Critique"); critique_4("Agent 5<br/>Critique"); critique_5("Agent 6<br/>Critique")
+            end
+            
+            subgraph S4 [Stage 4: Revision]
+                direction TB
+                subgraph S4_A [ ]
+                    direction LR
+                    revise_0("Agent 1<br/>Reviser"); revise_1("Agent 2<br/>Reviser"); revise_2("Agent 3<br/>Reviser")
+                end
+                subgraph S4_B [ ]
+                    direction LR
+                    revise_3("Agent 4<br/>Reviser"); revise_4("Agent 5<br/>Reviser"); revise_5("Agent 6<br/>Reviser")
+                end
+                style S4_A fill:none,stroke:none
+                style S4_B fill:none,stroke:none
+            end
+
+            subgraph S5 [Stage 5: Synthesis]
+              direction LR
+              synth_0("Synth A"); synth_1("Synth B")
+            end
+            
+            subgraph S6 [Stage 6: Final Synthesis]
+                final_synth_0(Master Synthesizer)
+            end
+
+            subgraph S7 [Stage 7: Final Review]
+                review_0(Final Reviewer)
+            end
+
+            subgraph S8 [Stage 8: Verification]
+                verify_0{Code Error?}
+                correct_0(Corrector)
+            end
+            
+            subgraph S9 [Output]
+                F(Final Response)
+            end
+
+            U --> init_0 & init_1 & init_2 & init_3 & init_4 & init_5
+
+            init_0 & init_1 & init_2 & init_3 & init_4 & init_5 --> init_collector(" ")
+            style init_collector fill:none,stroke:none
+            init_collector --> refine_0 & refine_1 & refine_2 & refine_3 & refine_4 & refine_5
+
+            refine_0 --> critique_0; refine_1 --> critique_1; refine_2 --> critique_2; refine_3 --> critique_3; refine_4 --> critique_4; refine_5 --> critique_5
+            
+            critique_0 & refine_0 --> revise_0
+            critique_1 & refine_1 --> revise_1
+            critique_2 & refine_2 --> revise_2
+            critique_3 & refine_3 --> revise_3
+            critique_4 & refine_4 --> revise_4
+            critique_5 & refine_5 --> revise_5
+
+            revise_0 & revise_1 & revise_2 --> synth_0
+            revise_3 & revise_4 & revise_5 --> synth_1
+
+            synth_0 & synth_1 --> final_synth_0
+
+            final_synth_0 --> review_0
+            review_0 --> verify_0
+            verify_0 -- Yes --> correct_0
+            correct_0 --> F
+            verify_0 -- No --> F
+    `;
+
+
+    useEffect(() => {
+        if (!isProcessing || !mermaidContainerRef.current) return;
+
+        const graph = isDeepThink ? deepThinkGraph : standardGraph;
+
+        const applyStylingAndHandlers = () => {
+            const container = mermaidContainerRef.current;
+            if (!container) return;
+
+            // --- Apply Visual Indicators ---
+            const stageMap: { [key: string]: { prefix: string; progressKey: keyof ProgressState; count: number } } = {
+                'Initializing': { prefix: 'init', progressKey: 'initial', count: progress.initial.length },
+                'Refining': { prefix: 'refine', progressKey: 'refining', count: progress.refining.length },
+                'Critiquing': { prefix: 'critique', progressKey: 'critiquing', count: progress.critiquing.length },
+                'Revising': { prefix: 'revise', progressKey: 'revising', count: progress.revising.length },
+                'Synthesizing': { prefix: 'synth', progressKey: 'synthesizing', count: progress.synthesizing.length },
+                'Finalizing': { prefix: 'final_synth', progressKey: 'finalSynthesizing', count: 1 },
+                'Performing final review': { prefix: 'review', progressKey: 'reviewing', count: 1 },
+                'Correcting': { prefix: 'correct', progressKey: 'verifying', count: 1 },
+            };
+
+            let activeStageKey = Object.keys(stageMap).find(key => loadingStatus.startsWith(key));
+            if (loadingStatus.startsWith('Synthesizing final response')) activeStageKey = 'Finalizing';
+            if (loadingStatus.startsWith('Synthesizing responses')) activeStageKey = 'Synthesizing';
+            const activeStage = activeStageKey ? stageMap[activeStageKey] : null;
+
+            Object.values(stageMap).forEach(stage => {
+                for (let i = 0; i < stage.count; i++) {
+                    const nodeEl = container.querySelector(
+                        `#${stage.prefix}_${i}, #${stage.prefix}_final, #${stage.prefix}_0`
+                    );
+                    if (!nodeEl) continue;
+
+                    nodeEl.classList.remove('active', 'completed');
+                    const progressState = progress[stage.progressKey];
+                    const isCompleted = Array.isArray(progressState) ? progressState[i] : progressState;
+
+                    if (isCompleted) {
+                        nodeEl.classList.add('completed');
+                    } else if (activeStage?.prefix === stage.prefix) {
+                        nodeEl.classList.add('active');
+                    }
+                }
+            });
+
+            // --- Attach Click Handlers ---
+            const allNodes = container.querySelectorAll('.node');
+            allNodes?.forEach(node => {
+                const [stage, indexStr] = node.id.split('_');
+                const index = indexStr === 'final' ? 0 : parseInt(indexStr);
+                
+                let responseExists = false;
+                if (agentResponses) {
+                    switch(stage) {
+                        case 'init': responseExists = !!agentResponses.initial[index]; break;
+                        case 'refine': responseExists = !!agentResponses.refined[index]; break;
+                        case 'critique': responseExists = !!agentResponses.critiques[index]; break;
+                        case 'revise': responseExists = !!agentResponses.revised[index]; break;
+                        case 'synth': responseExists = !!agentResponses.synthesized[index]; break;
+                        case 'final_synth': responseExists = !!agentResponses.finalSynthesized; break;
+                        case 'review': responseExists = !!agentResponses.reviewed; break;
+                        case 'correct': responseExists = !!agentResponses.correctedCode; break;
+                        case 'synth_final': responseExists = !!agentResponses.finalSynthesized; break;
+                    }
+                }
+
+                if (responseExists) {
+                    node.classList.add('clickable');
+                    (node as HTMLElement).onclick = () => onNodeClick(stage, index);
+                }
+            });
+        };
+
+        try {
+            mermaid.render('mermaid-svg', graph).then(({ svg }: { svg: string }) => {
+                if (mermaidContainerRef.current) {
+                    mermaidContainerRef.current.innerHTML = svg;
+                    applyStylingAndHandlers();
+                }
+            });
+        } catch (e) {
+            console.error("Mermaid rendering error:", e);
+            if (mermaidContainerRef.current) {
+                mermaidContainerRef.current.innerHTML = '<p class="error">Failed to render process graph.</p>';
+            }
+        }
+    }, [isProcessing, isDeepThink, progress, loadingStatus, agentResponses, onNodeClick]);
+
+
+    return (
+        <div className="process-view">
+            {isProcessing ? (
+                <div ref={mermaidContainerRef} className="mermaid-chart"></div>
+            ) : (
+                <div className="process-view-placeholder">
+                    Submit a prompt to see the agent process visualization.
+                </div>
+            )}
+        </div>
+    );
+};
+
 
 const App: FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -313,22 +711,28 @@ const App: FC = () => {
   const [inputText, setInputText] = useState('');
   const [attachedFile, setAttachedFile] = useState<{ data: string; mimeType: string; name: string } | null>(null);
   const [isDeepThink, setIsDeepThink] = useState<boolean>(false);
-  
+  const [examplePrompts, setExamplePrompts] = useState<ExamplePrompt[]>([]);
+  const [activeView, setActiveView] = useState<'chat' | 'process'>('chat');
+  const [agentResponses, setAgentResponses] = useState<AgentResponses | null>(null);
+  const [selectedNodeData, setSelectedNodeData] = useState<SelectedNode | null>(null);
+  const [showExtraOptions, setShowExtraOptions] = useState(false);
+
   const messageListRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
+  const mobileControlsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     document.body.className = `${theme}-mode`;
+    mermaid.initialize({ startOnLoad: false, theme: theme === 'dark' ? 'dark' : 'default', securityLevel: 'loose' });
   }, [theme]);
 
   useEffect(() => {
-    if (messageListRef.current) {
+    if (activeView === 'chat' && messageListRef.current) {
       messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
     }
-  }, [messages, isLoading]);
+  }, [messages, isLoading, activeView]);
   
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -340,6 +744,77 @@ const App: FC = () => {
     return () => clearInterval(interval);
   }, [isLoading]);
 
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (mobileControlsRef.current && !mobileControlsRef.current.contains(event.target as Node)) {
+                setShowExtraOptions(false);
+            }
+        };
+
+        if (showExtraOptions) {
+            document.addEventListener('mousedown', handleClickOutside);
+        }
+
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+        };
+    }, [showExtraOptions]);
+
+  useEffect(() => {
+    const fetchExamplePrompts = async () => {
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: "Generate 3 diverse and creative example prompts for a powerful AI assistant. Topics can include coding, explanation, creative writing, and planning. Return as a JSON object with a 'prompts' key containing an array of objects, where each object has a 'title' (max 35 chars) and a 'fullPrompt' key.",
+                config: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: Type.OBJECT,
+                        properties: {
+                            prompts: {
+                                type: Type.ARRAY,
+                                items: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        title: { type: Type.STRING },
+                                        fullPrompt: { type: Type.STRING }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            const jsonStr = response.text?.trim();
+            if (!jsonStr) {
+                throw new Error("API returned empty response for example prompts.");
+            }
+
+            const parsed = JSON.parse(jsonStr);
+            const validPrompts = parsed?.prompts?.filter(
+                (p: any): p is ExamplePrompt => p && typeof p.title === 'string' && typeof p.fullPrompt === 'string'
+            );
+
+            if (validPrompts && validPrompts.length > 0) {
+                setExamplePrompts(validPrompts.slice(0, 3));
+            } else {
+                throw new Error("Invalid or empty prompts array in API response.");
+            }
+        } catch (error) {
+            console.error("Failed to fetch example prompts, using fallback.", error);
+            setExamplePrompts([
+                { title: 'Quantum Computing Explained Simply', fullPrompt: 'Explain quantum computing in simple terms' },
+                { title: 'Python Script for Data Analysis', fullPrompt: 'Write a Python script for data analysis' },
+                { title: 'Plan a 3-Day Itinerary for Paris', fullPrompt: 'Suggest a 3-day itinerary for a trip to Paris' },
+            ]);
+        }
+    };
+
+    fetchExamplePrompts();
+  }, []);
+
   const handleThemeToggle = () => {
     setTheme(prev => {
       const newTheme = prev === 'light' ? 'dark' : 'light';
@@ -347,7 +822,11 @@ const App: FC = () => {
       return newTheme;
     });
   };
-  const handleClearChat = () => setMessages([]);
+  const handleClearChat = () => {
+    setMessages([]);
+    setAgentResponses(null);
+    setActiveView('chat');
+  };
   
   const handleAudioInput = () => {
     if (isListening) {
@@ -449,6 +928,35 @@ const App: FC = () => {
   const handleDeepThinkToggle = () => {
     setIsDeepThink(prev => !prev);
   };
+  
+  const handlePromptBubbleClick = (prompt: string) => {
+    setInputText(prompt);
+    inputRef.current?.focus();
+  };
+  
+    const handleNodeClick = (stage: string, index: number) => {
+        if (!agentResponses) return;
+
+        let title = '';
+        let content: string | undefined = '';
+
+        switch(stage) {
+            case 'init': title = `Initialization Agent ${index + 1}`; content = agentResponses.initial[index]; break;
+            case 'refine': title = `Refinement Agent ${index + 1}`; content = agentResponses.refined[index]; break;
+            case 'critique': title = `Critique Agent ${index + 1}`; content = agentResponses.critiques[index]; break;
+            case 'revise': title = `Revision Agent ${index + 1}`; content = agentResponses.revised[index]; break;
+            case 'synth': title = `Synthesis Agent ${index === 0 ? 'A' : 'B'}`; content = agentResponses.synthesized[index]; break;
+            case 'final_synth': title = `Master Synthesizer`; content = agentResponses.finalSynthesized; break;
+            case 'review': title = `Final Reviewer`; content = agentResponses.reviewed; break;
+            case 'correct': title = `Code Correction`; content = `\`\`\`\n${agentResponses.correctedCode}\n\`\`\``; break;
+            case 'synth_final': title = `Synthesizer`; content = agentResponses.finalSynthesized; break;
+        }
+
+        if (content) {
+            setSelectedNodeData({ title, content });
+        }
+    };
+
 
   const runOrchestration = async (numAgents: number, isDeepThink: boolean) => {
     const userInput = inputText.trim();
@@ -474,6 +982,8 @@ const App: FC = () => {
     const currentMessages = [...messages, userMessage];
     setMessages(currentMessages);
     setIsLoading(true);
+    setAgentResponses({ initial: [], refined: [], critiques: [], revised: [], synthesized: [], finalSynthesized: '', reviewed: '', correctedCode: '' });
+
     setProgress({
       initial: Array(numAgents).fill(false),
       refining: Array(numAgents).fill(false),
@@ -505,13 +1015,14 @@ const App: FC = () => {
           model: MODEL_NAME, contents: [...mainChatHistory, currentUserTurn], config: { systemInstruction: INITIAL_SYSTEM_INSTRUCTION }
         }).then(res => {
           initialAnswers[i] = res.text;
+          setAgentResponses(prev => prev ? ({ ...prev, initial: [...prev.initial, res.text].sort((a,b) => initialAnswers.indexOf(a) - initialAnswers.indexOf(b)) }) : null);
           setProgress(p => ({ ...p, initial: p.initial.map((s, idx) => idx === i ? true : s) }));
           return res;
         })
       );
       await Promise.all(initialAgentPromises);
 
-      // STAGE 3: REFINEMENT
+      // STAGE 2: REFINEMENT
       setLoadingStatus('Refining answers...');
       const refinedAnswers = Array(numAgents).fill('');
       const refinementAgentPromises = initialAnswers.map((currentAnswer, index) => {
@@ -526,6 +1037,7 @@ const App: FC = () => {
           model: MODEL_NAME, contents: [...mainChatHistory, refinementTurn], config: { systemInstruction: REFINEMENT_SYSTEM_INSTRUCTION }
         }).then(res => {
             refinedAnswers[index] = res.text;
+            setAgentResponses(prev => prev ? ({ ...prev, refined: [...prev.refined, res.text].sort((a,b) => refinedAnswers.indexOf(a) - refinedAnswers.indexOf(b)) }) : null);
             setProgress(p => ({ ...p, refining: p.refining.map((s, idx) => idx === index ? true : s) }));
             return res;
         });
@@ -534,9 +1046,9 @@ const App: FC = () => {
       
       let answersForSynthesis = refinedAnswers;
 
-      // STAGES 3.5 & 3.6: CRITIQUE & REVISION (DeepThink only)
+      // STAGES 3 & 4: CRITIQUE & REVISION (DeepThink only)
       if (isDeepThink) {
-        // STAGE 3.5: CRITIQUE ROUND
+        // STAGE 3: CRITIQUE ROUND
         setLoadingStatus('Critiquing responses...');
         const critiques = Array(numAgents).fill('');
         const critiquePromises = refinedAnswers.map((_, index) => {
@@ -549,18 +1061,17 @@ const App: FC = () => {
             model: MODEL_NAME, contents: [...mainChatHistory, critiqueTurn], config: { systemInstruction: CRITIQUE_AGENT_SYSTEM_INSTRUCTION }
           }).then(res => {
             critiques[index] = res.text;
+            setAgentResponses(prev => prev ? ({ ...prev, critiques: [...prev.critiques, res.text].sort((a,b) => critiques.indexOf(a) - critiques.indexOf(b)) }) : null);
             setProgress(p => ({ ...p, critiquing: p.critiquing.map((s, idx) => idx === index ? true : s) }));
             return res;
           });
         });
         await Promise.all(critiquePromises);
       
-        // STAGE 3.6: FINAL REVISION ROUND
+        // STAGE 4: FINAL REVISION ROUND
         setLoadingStatus('Revising based on feedback...');
         const finalRevisedAnswers = Array(numAgents).fill('');
         const revisionPromises = refinedAnswers.map((originalAnswer, index) => {
-          // Get the critique from the agent who reviewed this one's work.
-          // The `+ numAgents` prevents a negative result for the first agent (index 0).
           const peerCritique = critiques[(index - 1 + numAgents) % numAgents];
           const revisionContext = `Here was your original response:\n\n---ORIGINAL---\n${originalAnswer}\n\nHere is a critique from a peer:\n\n---CRITIQUE---\n${peerCritique}\n\nBased on the critique, provide an improved response to the original query.`;
           const revisionParts: Part[] = [...apiParts, { text: `\n\n---INTERNAL CONTEXT---\n${revisionContext}` }];
@@ -570,6 +1081,7 @@ const App: FC = () => {
             model: MODEL_NAME, contents: [...mainChatHistory, revisionTurn], config: { systemInstruction: REVISION_AGENT_SYSTEM_INSTRUCTION }
           }).then(res => {
             finalRevisedAnswers[index] = res.text;
+            setAgentResponses(prev => prev ? ({ ...prev, revised: [...prev.revised, res.text].sort((a,b) => finalRevisedAnswers.indexOf(a) - finalRevisedAnswers.indexOf(b)) }) : null);
             setProgress(p => ({ ...p, revising: p.revising.map((s, idx) => idx === index ? true : s) }));
             return res;
           });
@@ -581,7 +1093,7 @@ const App: FC = () => {
       let finalSynthesizerResponseText = '';
 
       if (isDeepThink) {
-          // STAGE 4: PARALLEL SYNTHESIS (DeepThink)
+          // STAGE 5: PARALLEL SYNTHESIS (DeepThink)
           setLoadingStatus('Synthesizing responses...');
           const firstHalf = answersForSynthesis.slice(0, 3);
           const secondHalf = answersForSynthesis.slice(3, 6);
@@ -593,6 +1105,7 @@ const App: FC = () => {
               
               return ai.models.generateContent({ model: MODEL_NAME, contents: [...mainChatHistory, turn], config: { systemInstruction: SYNTHESIZER_SYSTEM_INSTRUCTION } })
                   .then(res => {
+                      setAgentResponses(prev => prev ? ({ ...prev, synthesized: [...prev.synthesized, res.text] }) : null);
                       setProgress(p => ({ ...p, synthesizing: p.synthesizing.map((s, idx) => idx === index ? true : s) }));
                       return res.text;
                   });
@@ -603,17 +1116,18 @@ const App: FC = () => {
               synthesizerPromise(secondHalf, 1)
           ]);
           
-          // STAGE 5: FINAL SYNTHESIS (DeepThink)
+          // STAGE 6: FINAL SYNTHESIS (DeepThink)
           setLoadingStatus('Finalizing response...');
           const finalSynthesizerContext = `Here are two synthesized responses from different agent groups. Your task is to analyze, compare, and merge the best elements from each to create a single, master response that is comprehensive and polished.\n\n---SYNTHESIZED RESPONSE 1---\n${synthesizedResults[0]}\n\n---SYNTHESIZED RESPONSE 2---\n${synthesizedResults[1]}`;
           const finalSynthesizerParts: Part[] = [...apiParts, {text: `\n\n---INTERNAL CONTEXT---\n${finalSynthesizerContext}`}];
           const finalSynthesizerTurn: Content = { role: 'user', parts: finalSynthesizerParts };
           
           const finalSynthesizerResult = await ai.models.generateContent({ model: MODEL_NAME, contents: [...mainChatHistory, finalSynthesizerTurn], config: { systemInstruction: SYNTHESIZER_SYSTEM_INSTRUCTION } });
+          setAgentResponses(prev => prev ? ({...prev, finalSynthesized: finalSynthesizerResult.text}) : null);
           setProgress(p => ({ ...p, finalSynthesizing: true }));
           const synthesizedText = finalSynthesizerResult.text;
 
-          // STAGE 6: FINAL REVIEW (DeepThink)
+          // STAGE 7: FINAL REVIEW (DeepThink)
           setLoadingStatus('Performing final review...');
           const reviewContext = `Perform a final quality review on the following response. Check for clarity, coherence, grammar, and tone. Make only minor edits to polish the text. The user's original query was: "${userInput}".\n\n---RESPONSE TO REVIEW---\n${synthesizedText}`;
           const reviewTurn: Content = { role: 'user', parts: [{ text: reviewContext }] };
@@ -623,6 +1137,7 @@ const App: FC = () => {
             contents: [...mainChatHistory, reviewTurn],
             config: { systemInstruction: FINAL_REVIEW_SYSTEM_INSTRUCTION }
           });
+          setAgentResponses(prev => prev ? ({...prev, reviewed: reviewResult.text}) : null);
           setProgress(p => ({ ...p, reviewing: true }));
           finalSynthesizerResponseText = reviewResult.text;
 
@@ -634,6 +1149,7 @@ const App: FC = () => {
           const synthesizerTurn: Content = { role: 'user', parts: synthesizerParts };
 
           const synthesizerResult = await ai.models.generateContent({ model: MODEL_NAME, contents: [...mainChatHistory, synthesizerTurn], config: { systemInstruction: SYNTHESIZER_SYSTEM_INSTRUCTION } });
+          setAgentResponses(prev => prev ? ({...prev, finalSynthesized: synthesizerResult.text}) : null);
           setProgress(p => ({ ...p, synthesizing: [true] }));
           finalSynthesizerResponseText = synthesizerResult.text;
       }
@@ -662,19 +1178,21 @@ ERROR MESSAGE: ${syntaxError}
               });
               
               const correctedCode = verificationResult.text;
-              // Replace only the single incorrect code block
+              setAgentResponses(prev => prev ? ({...prev, correctedCode: correctedCode}) : null);
               finalResponseText = finalSynthesizerResponseText.replace(match[0], correctedCode);
               setProgress(p => ({ ...p, verifying: true }));
-              hasCorrected = true; // Only correct the first error found
+              hasCorrected = true; 
           }
       }
 
       const finalMessage: Message = { role: 'model', parts: [{ text: finalResponseText }] };
       setMessages(prev => [...prev, finalMessage]);
+      setActiveView('chat');
 
     } catch (error) {
       console.error('Error sending message to agents:', error);
       setMessages(prev => [...prev, { role: 'model', parts: [{ text: 'Sorry, I encountered an error. Please try again.' }] }]);
+      setActiveView('chat');
     } finally {
       setIsLoading(false);
     }
@@ -694,42 +1212,71 @@ ERROR MESSAGE: ${syntaxError}
             </button>
           </div>
         </header>
-        <div className="message-list" ref={messageListRef}>
-          {messages.map((msg, index) => (
-            <div key={index} className={`message ${msg.role}`}>
-              {msg.role === 'model' && <span className="agent-label">Synthesizer Agent</span>}
-              
-              {msg.parts.find(p => p.inlineData) && (
-                <img 
-                    src={`data:${msg.parts.find(p => p.inlineData)!.inlineData!.mimeType};base64,${msg.parts.find(p => p.inlineData)!.inlineData!.data}`}
-                    alt="Uploaded content"
-                    className="message-image"
-                />
-              )}
-
-              {msg.parts.find(p => p.text) && (
-                 <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    code({node, className, children, ...props}) {
-                      const match = /language-(\w+)/.exec(className || '');
-                      if (match) {
-                        const lang = match[1];
-                        const codeString = String(children).replace(/\n$/, '');
-                        return <CodeBlock language={lang} code={codeString} onExecute={() => setExecutionCode({ language: lang, code: codeString })} />;
-                      }
-                      return <code className={className} {...props}>{children}</code>;
-                    }
-                  }}
-                >
-                  {msg.parts.find(p => p.text)!.text!}
-                </ReactMarkdown>
-              )}
-            </div>
-          ))}
-          {isLoading && <LoadingIndicator status={loadingStatus} time={timer} progress={progress} />}
+        <div className="main-tabs">
+            <button className={`main-tab ${activeView === 'chat' ? 'active' : ''}`} onClick={() => setActiveView('chat')}>Chat</button>
+            <button className={`main-tab ${activeView === 'process' ? 'active' : ''}`} onClick={() => setActiveView('process')}>Process</button>
         </div>
+        {activeView === 'chat' ? (
+          <div className="message-list" ref={messageListRef}>
+            {messages.map((msg, index) => (
+              <div key={index} className={`message ${msg.role}`}>
+                {msg.role === 'model' && <span className="agent-label">Synthesizer Agent</span>}
+                
+                {msg.parts.find(p => p.inlineData) && (
+                  <img 
+                      src={`data:${msg.parts.find(p => p.inlineData)!.inlineData!.mimeType};base64,${msg.parts.find(p => p.inlineData)!.inlineData!.data}`}
+                      alt="Uploaded content"
+                      className="message-image"
+                  />
+                )}
+
+                {msg.parts.find(p => p.text) && (
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      code({node, className, children, ...props}) {
+                        const match = /language-(\w+)/.exec(className || '');
+                        if (match) {
+                          const lang = match[1];
+                          const codeString = String(children).replace(/\n$/, '');
+                          return <CodeBlock language={lang} code={codeString} onExecute={() => setExecutionCode({ language: lang, code: codeString })} />;
+                        }
+                        return <code className={className} {...props}>{children}</code>;
+                      }
+                    }}
+                  >
+                    {msg.parts.find(p => p.text)!.text!}
+                  </ReactMarkdown>
+                )}
+              </div>
+            ))}
+            {isLoading && <LoadingIndicator status={loadingStatus} time={timer} progress={progress} />}
+          </div>
+        ) : (
+            <ProcessView 
+                isDeepThink={isDeepThink}
+                isProcessing={isLoading || agentResponses !== null}
+                progress={progress}
+                loadingStatus={loadingStatus}
+                agentResponses={agentResponses}
+                onNodeClick={handleNodeClick}
+            />
+        )}
         <form className="input-area" onSubmit={handleSubmit}>
+          {messages.length === 0 && !isLoading && examplePrompts.length > 0 && (
+            <div className="prompt-bubbles-container">
+              {examplePrompts.map((prompt, index) => (
+                <button
+                  type="button"
+                  key={index}
+                  className="prompt-bubble"
+                  onClick={() => handlePromptBubbleClick(prompt.fullPrompt)}
+                >
+                  {prompt.title}
+                </button>
+              ))}
+            </div>
+          )}
           {attachedFile && (
             <div className="attachment-preview">
                {attachedFile.mimeType.startsWith('image/') ? (
@@ -757,26 +1304,49 @@ ERROR MESSAGE: ${syntaxError}
               value={inputText}
               onChange={e => setInputText(e.target.value)}
             />
-            <button type="button" disabled={isLoading} onClick={() => fileInputRef.current?.click()} className="control-button attach" aria-label="Attach file">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
-            </button>
-            <button type="button" disabled={isLoading} onClick={handleAudioInput} className={`mic-button ${isListening ? 'listening' : ''}`} aria-label="Use microphone">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z"/>
-              </svg>
-            </button>
-            <button 
-              type="button" 
-              onClick={handleDeepThinkToggle} 
-              disabled={isLoading} 
-              className={`deep-think-button ${isDeepThink ? 'selected' : ''}`} 
-              aria-label="Toggle DeepThink mode"
-              title="DeepThink"
-            >
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="24px" height="24px">
-                  <path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"/>
+            <div className="desktop-controls">
+                <button type="button" disabled={isLoading} onClick={() => fileInputRef.current?.click()} className="control-button attach" aria-label="Attach file">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
+                </button>
+                <button type="button" disabled={isLoading} onClick={handleAudioInput} className={`mic-button ${isListening ? 'listening' : ''}`} aria-label="Use microphone">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z"/>
                 </svg>
-            </button>
+                </button>
+                <button 
+                type="button" 
+                onClick={handleDeepThinkToggle} 
+                disabled={isLoading} 
+                className={`deep-think-button ${isDeepThink ? 'selected' : ''}`} 
+                aria-label="Toggle DeepThink mode"
+                title="DeepThink"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="24px" height="24px">
+                    <path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"/>
+                    </svg>
+                </button>
+            </div>
+            <div className="mobile-controls" ref={mobileControlsRef}>
+                <button type="button" onClick={() => setShowExtraOptions(prev => !prev)} className="control-button" aria-label="More options" disabled={isLoading}>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+                </button>
+                {showExtraOptions && (
+                    <div className="mobile-options-menu">
+                        <button type="button" disabled={isLoading} onClick={() => { fileInputRef.current?.click(); setShowExtraOptions(false); }}>
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
+                            <span>Attach file</span>
+                        </button>
+                        <button type="button" disabled={isLoading} onClick={() => { handleAudioInput(); setShowExtraOptions(false); }} className={`${isListening ? 'listening' : ''}`}>
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z"/></svg>
+                            <span>Use microphone</span>
+                        </button>
+                        <button type="button" onClick={() => { handleDeepThinkToggle(); setShowExtraOptions(false); }} disabled={isLoading} className={`${isDeepThink ? 'selected' : ''}`}>
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"/></svg>
+                            <span>DeepThink</span>
+                        </button>
+                    </div>
+                )}
+            </div>
             <button type="submit" disabled={isLoading || (!inputText.trim() && !attachedFile)} aria-label="Send message">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
@@ -786,6 +1356,7 @@ ERROR MESSAGE: ${syntaxError}
         </form>
       </div>
       {executionCode && <ExecutionEnvironment {...executionCode} onClose={() => setExecutionCode(null)} />}
+      {selectedNodeData && <AgentResponseViewer data={selectedNodeData} onClose={() => setSelectedNodeData(null)} />}
     </>
   );
 };
